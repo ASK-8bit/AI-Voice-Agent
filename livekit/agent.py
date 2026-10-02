@@ -1,5 +1,5 @@
-import os
-from livekit import agents
+from dotenv import load_dotenv
+
 from livekit.agents import (
     Agent,
     AgentServer,
@@ -10,7 +10,8 @@ from livekit.agents import (
 )
 from livekit.plugins import google
 
-# No dotenv here — Render injects env vars directly
+load_dotenv(".env.local")  # only used for local runs; LiveKit Cloud injects secrets
+
 SYSTEM_PROMPT = """
 You are Puck, a sharp and friendly support agent for Acme Corp.
 
@@ -45,7 +46,7 @@ class Assistant(Agent):
             "status": "active",
             "plan": "Premium",
             "billing_status": "paid",
-            "message": "Your account is active and in good standing."
+            "message": "Your account is active and in good standing.",
         }
 
 
@@ -56,10 +57,13 @@ server = AgentServer()
 async def entrypoint(ctx: JobContext):
     session = AgentSession(
         llm=google.realtime.RealtimeModel(
-            model="gemini-2.0-flash-live-001",  # stable model name for production
+            model="gemini-3.1-flash-live-preview",  # confirmed supported
             voice="Puck",
+            # instructions can also go here if you prefer
+            # instructions=SYSTEM_PROMPT,
         ),
     )
+
     await session.start(
         agent=Assistant(),
         room=ctx.room,
