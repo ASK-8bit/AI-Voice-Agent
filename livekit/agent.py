@@ -1,4 +1,10 @@
+import os
+import json
+from datetime import datetime, timezone
+from typing import Optional
+
 from dotenv import load_dotenv
+from supabase import create_client, Client
 
 from livekit.agents import (
     Agent,
@@ -12,6 +18,22 @@ from livekit.plugins import google
 
 load_dotenv(".env")  # or .env
 
+# -------------------------------------------------
+# Supabase client
+# -------------------------------------------------
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+supabase: Optional[Client] = None
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+else:
+    print("WARNING: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing")
+
+
+# -------------------------------------------------
+# System prompt
+# -------------------------------------------------
 SYSTEM_PROMPT = """
 You are Aria, a friendly, professional and concise Indian customer support specialist for Aura Skincare.
 
@@ -52,70 +74,166 @@ Cash on Delivery (COD):
 - When the customer asks about an order, call the tool first, then speak the result naturally.
 """
 
-# Mock Order Database
-ORDERS = {
-    "ORD-101": {
-        "order_id": "ORD-101",
-        "customer": "Priya Sharma",
-        "product": "Vitamin C Serum (30ml)",
-        "value": "₹699",
-        "status": "Out for Delivery",
-        "notes": "BlueDart — BD-982103. Expected by 6 PM today",
-    },
-    "ORD-102": {
-        "order_id": "ORD-102",
-        "customer": "Rahul Verma",
-        "product": "Hydrating Sunscreen SPF 50",
-        "value": "₹499",
-        "status": "Delivered",
-        "notes": "Delhivery — DL-441029. Delivered 14 days ago",
-    },
-    "ORD-103": {
-        "order_id": "ORD-103",
-        "customer": "Ananya Patel",
-        "product": "Green Tea Face Wash + Toner",
-        "value": "₹850",
-        "status": "Processing",
-        "notes": "Ordered 3 hours ago. Eligible for cancellation",
-    },
-}
 
-
+# -------------------------------------------------
+# Agent
+# -------------------------------------------------
 class Aria(Agent):
     def __init__(self) -> None:
         super().__init__(instructions=SYSTEM_PROMPT)
+        self.transcript: list[dict] = []
+        self.started_at: Optional[datetime] = None
+        self.room_name: Optional[str] = None
+
+    def add_turn(self, role: str, content: str):
+        """Append a turn to the in-memory transcript."""
+        if not content or not content.strip():
+            return
+        self.transcript.append({
+            "role": role,          # "user" or "agent"
+            "content": content.strip(),
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
 
     @function_tool
     async def get_order_details(self, order_id: str) -> dict:
         """Look up order details by order ID. Use this whenever the customer mentions an order number."""
+        if not supabase:
+            return {"found": False, "message": "Order database is temporarily unavailable."}
+
         order_id = order_id.strip().upper()
-        order = ORDERS.get(order_id)
-        if not order:
+        try:
+            result = (
+                supabase.table("orders")
+                .select("*")
+                .eq("order_id", order_id)
+                .maybe_single()
+                .execute()
+            )
+            if not result.data:
+                return {
+                    "found": False,
+                    "message": f"No order found with ID {order_id}. Please double-check the order ID.",
+                }
+            row = result.data
             return {
-                "found": False,
-                "message": f"No order found with ID {order_id}. Please double-check the order ID.",
+                "found": True,
+                "order_id": row["order_id"],
+                "customer": row["customer"],
+                "product": row["product"],
+                "value": row["value"],
+                "status": row["status"],
+                "notes": row.get("notes") or "",
             }
-        return {
-            "found": True,
-            **order,
+        except Exception as e:
+            print(f"Supabase order lookup error: {e}")
+            return {"found": False, "message": "Could not fetch order details right now. Please try again."}
+
+    async def save_call_session(
+        self,
+        customer_intent: str = "GENERAL",
+        order_id: Optional[str] = None,
+        resolution_status: str = "RESOLVED",
+        call_summary: str = "",
+    ):
+        """Save transcript + structured outcome to Supabase."""
+        if not supabase:
+            print("Skipping save – Supabase not configured")
+            return
+
+        payload = {
+            "room_name": self.room_name,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "ended_at": datetime.now(timezone.utc).isoformat(),
+            "customer_intent": customer_intent,
+            "order_id": order_id,
+            "resolution_status": resolution_status,
+            "call_summary": call_summary,
+            "transcript": self.transcript,
         }
 
+        try:
+            supabase.table("call_sessions").insert(payload).execute()
+            print(f"Saved call_session for room {self.room_name}")
+        except Exception as e:
+            print(f"Failed to save call_session: {e}")
 
+
+# -------------------------------------------------
+# Server + entrypoint
+# -------------------------------------------------
 server = AgentServer()
 
 
 @server.rtc_session(agent_name="Voice Agent")
 async def entrypoint(ctx: JobContext):
+    agent = Aria()
+    agent.room_name = ctx.room.name
+    agent.started_at = datetime.now(timezone.utc)
+
     session = AgentSession(
         llm=google.realtime.RealtimeModel(
             model="gemini-3.1-flash-live-preview",
-            voice="Puck",          # closest available; can change later if Indian voice is available
-            # temperature=0.7,     # optional
+            voice="Puck",
         ),
     )
 
+    # ---- Collect transcript from conversation items ----
+    @session.on("conversation_item_added")
+    def on_conversation_item(item):
+        try:
+            # item role is usually "user" or "assistant"
+            role = "user" if getattr(item, "role", "") == "user" else "agent"
+            text = ""
+            if hasattr(item, "text_content") and item.text_content:
+                text = item.text_content
+            elif hasattr(item, "content"):
+                # content can be list of parts
+                parts = item.content if isinstance(item.content, list) else [item.content]
+                text = " ".join(str(p) for p in parts if p)
+            if text:
+                agent.add_turn(role, text)
+        except Exception as e:
+            print(f"transcript capture error: {e}")
+
+    # ---- On session close → generate summary + save ----
+    async def on_shutdown():
+        # Simple heuristic summary if we don't call LLM again
+        # (You can later upgrade this to an LLM structured output call)
+        order_id = None
+        intent = "GENERAL"
+        for turn in agent.transcript:
+            content = turn["content"].upper()
+            if "ORD-" in content:
+                # crude extract
+                for word in content.replace(",", " ").split():
+                    if word.startswith("ORD-"):
+                        order_id = word.strip(".,?")
+                        break
+            if any(k in content for k in ["TRACK", "WHERE IS", "STATUS", "DELIVERY"]):
+                intent = "ORDER_TRACKING"
+            elif any(k in content for k in ["RETURN", "REFUND"]):
+                intent = "RETURN"
+            elif any(k in content for k in ["CANCEL"]):
+                intent = "CANCEL"
+
+        summary = "Call completed."
+        if agent.transcript:
+            # very short summary from last few turns
+            last_user = next((t["content"] for t in reversed(agent.transcript) if t["role"] == "user"), "")
+            summary = f"Customer discussed: {last_user[:120]}" if last_user else summary
+
+        await agent.save_call_session(
+            customer_intent=intent,
+            order_id=order_id,
+            resolution_status="RESOLVED",
+            call_summary=summary,
+        )
+
+    ctx.add_shutdown_callback(on_shutdown)
+
     await session.start(
-        agent=Aria(),
+        agent=agent,
         room=ctx.room,
     )
 
