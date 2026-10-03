@@ -15,6 +15,7 @@ from livekit.agents import (
     function_tool,
 )
 from livekit.plugins import google
+from livekit import rtc
 
 load_dotenv(".env")  # or .env
 
@@ -46,7 +47,7 @@ Aura Skincare is a premium organic Indian skincare brand focused on simple, effe
 Shipping:
 - Free delivery on orders above ₹499
 - Orders below ₹499 have a ₹50 shipping fee
-- Standard delivery takes 3–5 business days
+- Standard delivery takes 3-5 business days
 
 Return & Refund:
 - Returns accepted within 7 days of delivery
@@ -62,6 +63,12 @@ Cancellation:
 Cash on Delivery (COD):
 - Available for orders up to ₹2,500
 - Customer can pay by cash or UPI at the doorstep
+
+Order ID handling:
+- Customers will say order IDs naturally (e.g. “ORD-101”, “ORD 101”, “order one zero one”, “O R D dash one zero one”, “order ID 101”, etc.).
+- Always extract and normalize the order ID yourself into the standard format ORD-XXX (e.g. convert “order one zero one” or “ORD dash 101” → “ORD-101”).
+- Then call get_order_details with the normalized ID.
+- Never ask the customer to say “ORD dash …” or any rigid format. Accept whatever natural way they say it.
 
 === BEHAVIOUR RULES ===
 - Only help with Aura Skincare related queries (products, orders, shipping, returns, cancellations, COD).
@@ -84,6 +91,7 @@ class Aria(Agent):
         self.transcript: list[dict] = []
         self.started_at: Optional[datetime] = None
         self.room_name: Optional[str] = None
+        self._room: Optional[rtc.Room] = None  # for data channel publishing
 
     def add_turn(self, role: str, content: str):
         """Append a turn to the in-memory transcript."""
@@ -94,6 +102,16 @@ class Aria(Agent):
             "content": content.strip(),
             "ts": datetime.now(timezone.utc).isoformat(),
         })
+
+    async def publish_transcript(self, role: str, text: str):
+        """Broadcast a transcript turn over LiveKit data channel so the frontend can display it."""
+        if not self._room or not text.strip():
+            return
+        try:
+            packet = json.dumps({"type": "transcript", "speaker": role, "text": text.strip()}).encode("utf-8")
+            await self._room.local_participant.publish_data(packet, reliable=True)
+        except Exception as e:
+            print(f"publish_data error: {e}")
 
     @function_tool
     async def get_order_details(self, order_id: str) -> dict:
@@ -153,8 +171,27 @@ class Aria(Agent):
         }
 
         try:
-            supabase.table("call_sessions").insert(payload).execute()
-            print(f"Saved call_session for room {self.room_name}")
+            # Upsert: if the frontend already inserted a row, update it; otherwise insert fresh
+            existing = (
+                supabase.table("call_sessions")
+                .select("id")
+                .eq("room_name", self.room_name)
+                .maybe_single()
+                .execute()
+            )
+            if existing.data:
+                supabase.table("call_sessions").update({
+                    "ended_at": payload["ended_at"],
+                    "customer_intent": customer_intent,
+                    "order_id": order_id,
+                    "resolution_status": resolution_status,
+                    "call_summary": call_summary,
+                    "transcript": self.transcript,
+                }).eq("room_name", self.room_name).execute()
+                print(f"Updated existing call_session for room {self.room_name}")
+            else:
+                supabase.table("call_sessions").insert(payload).execute()
+                print(f"Inserted new call_session for room {self.room_name}")
         except Exception as e:
             print(f"Failed to save call_session: {e}")
 
@@ -170,6 +207,7 @@ async def entrypoint(ctx: JobContext):
     agent = Aria()
     agent.room_name = ctx.room.name
     agent.started_at = datetime.now(timezone.utc)
+    agent._room = ctx.room  # store room ref for data channel publishing
 
     session = AgentSession(
         llm=google.realtime.RealtimeModel(
@@ -180,19 +218,27 @@ async def entrypoint(ctx: JobContext):
 
     # ---- Collect transcript from conversation items ----
     @session.on("conversation_item_added")
-    def on_conversation_item(item):
+    def on_conversation_item(event):
+        import asyncio
         try:
-            # item role is usually "user" or "assistant"
-            role = "user" if getattr(item, "role", "") == "user" else "agent"
+            # The event is a ConversationItemAddedEvent wrapper – unwrap the actual ChatMessage
+            msg = getattr(event, "item", event)
+
+            role_raw = getattr(msg, "role", "")
+            role = "user" if role_raw == "user" else "agent"
+
+            # Extract text from the ChatMessage
             text = ""
-            if hasattr(item, "text_content") and item.text_content:
-                text = item.text_content
-            elif hasattr(item, "content"):
-                # content can be list of parts
-                parts = item.content if isinstance(item.content, list) else [item.content]
+            if hasattr(msg, "text_content") and msg.text_content:
+                text = msg.text_content
+            elif hasattr(msg, "content"):
+                parts = msg.content if isinstance(msg.content, list) else [msg.content]
                 text = " ".join(str(p) for p in parts if p)
+
             if text:
                 agent.add_turn(role, text)
+                # Broadcast to frontend over data channel (fire-and-forget)
+                asyncio.ensure_future(agent.publish_transcript(role, text))
         except Exception as e:
             print(f"transcript capture error: {e}")
 
