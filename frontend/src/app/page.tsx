@@ -354,21 +354,26 @@ export default function VoiceAgentPage() {
         }
       });
 
-      // 6. Data Packets (if agent sends transcription or tool logs)
+      // 6. Data Packets (agent transcript over data channel)
       room.on(RoomEvent.DataReceived, (payload: Uint8Array) => {
         try {
           const str = new TextDecoder().decode(payload);
           const data = JSON.parse(str);
           if (data.type === "transcript" && data.text) {
-            setTranscript((prev) => [
-              ...prev,
-              {
-                id: `agent-trans-${Date.now()}`,
-                role: data.speaker === "user" ? "user" : "agent",
-                text: data.text,
-                timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-              },
-            ]);
+            // Only add agent turns here – user turns are already captured by Web Speech API
+            // to avoid duplicates. If Web Speech is unavailable, also accept user turns.
+            const isSpeechAPIActive = !!speechRecognitionRef.current;
+            if (data.speaker === "agent" || !isSpeechAPIActive) {
+              setTranscript((prev) => [
+                ...prev,
+                {
+                  id: `agent-trans-${Date.now()}-${Math.random()}`,
+                  role: data.speaker === "user" ? "user" : "agent",
+                  text: data.text,
+                  timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+                },
+              ]);
+            }
           }
         } catch {}
       });

@@ -46,13 +46,31 @@ export async function POST(req: NextRequest) {
       transcript: transcript || [],
     };
 
-    const { data, error } = await supabase
+    // Check if a row already exists for this room_name (agent may have inserted first)
+    const roomName = payload.room_name as string;
+    const { data: existing } = await supabase
       .from("call_sessions")
-      .insert([payload])
-      .select();
+      .select("id")
+      .eq("room_name", roomName)
+      .maybeSingle();
+
+    let data, error;
+    if (existing) {
+      // Row exists – update it with the frontend-computed transcript and outcome
+      ({ data, error } = await supabase
+        .from("call_sessions")
+        .update(payload)
+        .eq("room_name", roomName)
+        .select());
+    } else {
+      ({ data, error } = await supabase
+        .from("call_sessions")
+        .insert([payload])
+        .select());
+    }
 
     if (error) {
-      console.error("Supabase call_sessions insert error:", error);
+      console.error("Supabase call_sessions upsert error:", error);
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
