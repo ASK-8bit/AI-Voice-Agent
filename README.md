@@ -22,14 +22,14 @@ flowchart TD
     end
 
     subgraph Vercel ["Next.js Backend (Vercel Serverless)"]
-        TokenAPI["/api/token (LiveKit JWT & Dispatch)"]
-        OrdersAPI["/api/orders (Supabase Query)"]
-        SessionAPI["/api/call-sessions (Save Outcome)"]
+        TokenAPI["/api/token — LiveKit JWT and Dispatch"]
+        OrdersAPI["/api/orders — Supabase Query"]
+        SessionAPI["/api/call-sessions — Save Outcome"]
     end
 
     subgraph LiveKitCloud ["LiveKit Cloud RTC"]
-        Room["LiveKit Room (Dedicated per session)"]
-        AgentWorker["Aria Voice Agent (CA_UUBFjR4nASGH)"]
+        Room["LiveKit Room — Dedicated per session"]
+        AgentWorker["Aria Voice Agent (Python)"]
     end
 
     subgraph AIModel ["Google Realtime Multimodal AI"]
@@ -37,17 +37,18 @@ flowchart TD
     end
 
     subgraph SupabaseDB ["Supabase PostgreSQL"]
-        OrdersTable["public.orders (ORD-101, 102, 103)"]
-        SessionsTable["public.call_sessions (Audit Logs)"]
+        OrdersTable["public.orders"]
+        SessionsTable["public.call_sessions — Audit Logs"]
     end
 
-    UI -->|"1. Request Token & Dispatch"| TokenAPI
-    TokenAPI -->|"2. Trigger Dispatch & Issue JWT"| LiveKitCloud
-    WebRTC <==|"3. Direct Encrypted WebRTC Audio"|==> Room
-    Room <==> AgentWorker
-    AgentWorker <==|"4. Real-time Audio Stream"|==> Gemini
-    AgentWorker <-->|"5. Tool Call: get_order_details"| OrdersTable
-    UI -->|"6. Query Orders & Policies"| OrdersAPI
+    UI -->|"1. Request Token and Dispatch"| TokenAPI
+    TokenAPI -->|"2. Issue JWT and Trigger Dispatch"| LiveKitCloud
+    WebRTC -->|"3. Direct Encrypted WebRTC Audio"| Room
+    Room --> AgentWorker
+    AgentWorker -->|"4. Real-time Audio Stream"| Gemini
+    Gemini -->|"Audio Response"| AgentWorker
+    AgentWorker -->|"5. Tool Call: get_order_details"| OrdersTable
+    UI -->|"6. Query Orders"| OrdersAPI
     OrdersAPI --> OrdersTable
     UI -->|"7. Persist Post-Call Summary"| SessionAPI
     SessionAPI --> SessionsTable
@@ -134,47 +135,33 @@ cp .env.example .env.local
 Fill in the following credentials:
 ```env
 # LiveKit Cloud Configuration
-LIVEKIT_URL=wss://internship-m06ow6gq.livekit.cloud
-LIVEKIT_API_KEY=APIHGKt7oH82aLy
-LIVEKIT_API_SECRET=Zl5ddH0bnNOGRwUzJKmW5XKzlZueGQG1Vkr7ivj14Ef
-NEXT_PUBLIC_LIVEKIT_URL=wss://internship-m06ow6gq.livekit.cloud
+LIVEKIT_URL=your_livekit_wss_url
+LIVEKIT_API_KEY=your_livekit_api_key
+LIVEKIT_API_SECRET=your_livekit_api_secret
+NEXT_PUBLIC_LIVEKIT_URL=your_livekit_wss_url
 
 # Supabase Configuration
-SUPABASE_URL=https://xlloepeymjjrulmjfvxp.supabase.co
+SUPABASE_URL=your_supabase_project_url
 SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
-NEXT_PUBLIC_SUPABASE_URL=https://xlloepeymjjrulmjfvxp.supabase.co
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
 ```
 
-### 3. Install Dependencies & Run Development Server
+### 3. Start the Voice Agent
 ```bash
+cd ../livekit
+python agent.py console
+# or if using uv:
+uv run agent.py console
+```
+
+### 4. Install Dependencies & Run Development Server
+```bash
+cd ../frontend
 npm install
 npm run dev
 ```
 Open **[http://localhost:3000](http://localhost:3000)** in your browser (Google Chrome or Microsoft Edge recommended for best WebRTC & Web Speech support).
-
----
-
-## 🚢 Vercel Deployment Instructions
-
-1. Push code to your GitHub repository:
-   ```bash
-   git add .
-   git commit -m "feat: complete Aura Skincare AI Voice Agent frontend & backend"
-   git push origin main
-   ```
-2. Go to **[vercel.com](https://vercel.com)** $\rightarrow$ **Add New Project** $\rightarrow$ Import your GitHub repository.
-3. Set the **Root Directory** to `frontend`.
-4. Add the Environment Variables from `.env.local` into the Vercel dashboard:
-   - `LIVEKIT_URL`
-   - `LIVEKIT_API_KEY`
-   - `LIVEKIT_API_SECRET`
-   - `NEXT_PUBLIC_LIVEKIT_URL`
-   - `SUPABASE_URL`
-   - `SUPABASE_SERVICE_ROLE_KEY`
-   - `NEXT_PUBLIC_SUPABASE_URL`
-   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-5. Click **Deploy**. Vercel will automatically build and provide a public HTTPS URL.
 
 ---
 
